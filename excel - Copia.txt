@@ -1,0 +1,328 @@
+import os
+import pandas as pd
+import openpyxl
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
+
+
+def salvar_resultado_tres_abas(arquivo_original, df_base, resultados, comandantes=None):
+    if comandantes is None:
+        comandantes = []
+
+    pasta = os.path.dirname(arquivo_original)
+    nome = os.path.splitext(os.path.basename(arquivo_original))[0]
+    arquivo_saida = os.path.join(pasta, f"{nome}_RESULTADO.xlsx")
+
+    df_res = pd.DataFrame(resultados)
+    df_com = pd.DataFrame(comandantes)
+
+    colunas_padrao = [
+        "CPF",
+        "SARAM",
+        "Sexo",
+        "Posto",
+        "Quadro",
+        "Especialidade",
+        "Sub-Especialidade",
+        "Nome",
+        "Nome Guerra",
+        "OM",
+        "Nº Quadro",
+        "Primeira Promoção",
+        "Data da Promoção Atual",
+        "Promoções",
+        "Situação OM",
+        "Erro",
+        "Dados_formatados",
+    ]
+
+    for coluna in colunas_padrao:
+        if coluna not in df_res.columns:
+            df_res[coluna] = ""
+        else:
+            df_res[coluna] = df_res[coluna].fillna("").astype(str).str.upper()
+
+        if not df_com.empty and coluna not in df_com.columns:
+            df_com[coluna] = ""
+        elif not df_com.empty:
+            df_com[coluna] = df_com[coluna].fillna("").astype(str).str.upper()
+
+    for df_atual in [df_res, df_com]:
+        if df_atual.empty:
+            continue
+        for idx, row in df_atual.iterrows():
+            full_name = str(row.get("Nome", "")).strip()
+            war_name = str(row.get("Nome Guerra", "")).strip()
+            if full_name and war_name:
+                if full_name.endswith(" " + war_name):
+                    without_last = full_name[: -len(war_name)].strip()
+                    if war_name in without_last:
+                        df_atual.at[idx, "Nome"] = without_last
+
+    map_posto = {
+        "ASP": "Asp",
+        "1T": "1º Ten",
+        "2T": "2º Ten",
+        "CP": "Cap",
+        "MJ": "Maj",
+        "TC": "Ten Cel",
+        "CL": "Cel",
+        "BR": "Brig",
+        "MB": "Maj Brig",
+        "TB": "Ten Brig",
+    }
+
+    map_quadro = {
+        "QOAV": "Av",
+        "QOINF": "Inf",
+        "QOINT": "Int",
+        "QOENG": "Eng",
+        "QOMED": "Med",
+        "QOARM": "Esp Arm",
+        "QOEAV": "Esp Av",
+        "QOECOM": "Esp Com",
+        "QOECTA": "Esp CTA",
+        "QOEFOT": "Esp Fot",
+        "QOEMET": "Esp Met",
+        "QOESUP": "Esp Sup Tec",
+        "QOEA": "Esp Aer SVA",
+        "QOCON": "QOCon",
+    }
+    oficiais = ["ASP", "2T", "1T", "CP", "MJ", "TC", "CL", "BR", "MB", "TB"]
+
+    def gerar_dados_formatados(df_alvo, tipo="aluno"):
+        lista_fmt = []
+        for idx, row in df_alvo.iterrows():
+            forca = str(row.get("Força", "")).strip().upper()
+            p_raw = str(row.get("Posto", "")).strip().upper()
+            q_raw = str(row.get("Quadro", "")).strip().upper()
+            esp_raw = str(row.get("Especialidade", "")).strip().upper()
+            nome = str(row.get("Nome", "")).strip()
+            om = str(row.get("OM", "")).strip()
+
+            om_lower = om.lower()
+            is_marinha = "marinha" in om_lower or "mb" in om_lower or forca == "MARINHA"
+            is_exercito = (
+                "exército" in om_lower
+                or "exercito" in om_lower
+                or "eb" in om_lower
+                or forca == "EXÉRCITO"
+            )
+
+            if tipo == "comandante":
+                # Comandantes: apenas Posto + [Quadro] + Nome (sem SARAM e sem OM)
+                q_str = f" {q_raw}" if q_raw and q_raw != "NAN" else ""
+                esp_str = (
+                    f" {esp_raw}"
+                    if esp_raw and esp_raw != "NAN" and esp_raw != "NTE"
+                    else ""
+                )
+                linha_fmt = f"{p_raw}{q_str}{esp_str} {nome}".strip()
+            else:
+                if is_marinha or is_exercito:
+                    nome_forca = "MARINHA" if is_marinha else "EXÉRCITO"
+                    q_str = f" {q_raw}" if q_raw and q_raw != "NAN" else ""
+                    esp_str = (
+                        f" {esp_raw}"
+                        if esp_raw and esp_raw != "NAN" and esp_raw != "NTE"
+                        else ""
+                    )
+                    linha_fmt = f"{p_raw}{q_str}{esp_str} {nome} - {nome_forca}".strip()
+                else:
+                    posto_fmt = map_posto.get(p_raw, p_raw)
+                    quadro_fmt = map_quadro.get(q_raw, q_raw)
+                    saram = str(row.get("SARAM", "")).strip()
+
+                    if p_raw in oficiais:
+                        esp_parte = (
+                            "" if esp_raw == "NTE" or not esp_raw else f" {esp_raw}"
+                        )
+                        q_str = f" {quadro_fmt}" if quadro_fmt else ""
+                        linha_fmt = f"{posto_fmt}{q_str}{esp_parte} {nome} - {saram} - {om}".strip()
+                    else:
+                        esp_str = f" {esp_raw}" if esp_raw and esp_raw != "NAN" else ""
+                        linha_fmt = (
+                            f"{posto_fmt}{esp_str} {nome} - {saram} - {om}".strip()
+                        )
+            lista_fmt.append(linha_fmt)
+        return lista_fmt
+
+    # Aba 1: Consolidado_Base (Mantém a ordem original da base e preenche Dados_formatados)
+    df_aba1 = df_base.copy()
+    if "CPF_limpo" in df_aba1.columns:
+        df_aba1 = df_aba1.drop(columns=["CPF_limpo"])
+
+    colunas_tico_extras = [c for c in colunas_padrao if c not in df_aba1.columns]
+    for c in colunas_tico_extras:
+        df_aba1[c] = ""
+
+    for idx, row in df_aba1.iterrows():
+        cpf_base = str(row.get("CPF", "")).strip()
+        match = df_res[df_res["CPF"].str.contains(cpf_base, na=False)]
+        if not match.empty:
+            for col in colunas_padrao:
+                if col in match.columns and col != "CPF":
+                    df_aba1.at[idx, col] = match.iloc[0][col]
+
+    # Preenche a coluna Dados_formatados na aba 1 seguindo a ordem original da base
+    df_aba1["Dados_formatados"] = gerar_dados_formatados(df_aba1, tipo="aluno")
+
+    # Aba 2: Antiguidade_Formatada (Ordenada por Antiguidade)
+    df_aba2 = df_res.copy()
+    for idx, row in df_aba2.iterrows():
+        cpf_atual = str(row.get("CPF", "")).strip()
+        match_base = (
+            df_base[
+                df_base.astype(str)
+                .apply(lambda x: x.str.contains(cpf_atual, na=False))
+                .any(axis=1)
+            ]
+            if cpf_atual
+            else pd.DataFrame()
+        )
+
+        if not match_base.empty:
+            for col_b in match_base.columns:
+                col_b_lower = str(col_b).strip().lower()
+                val_b = str(match_base.iloc[0][col_b]).strip()
+                if (
+                    col_b_lower in ["firstname", "posto"]
+                    and not str(row.get("Posto", "")).strip()
+                ):
+                    df_aba2.at[idx, "Posto"] = val_b
+                elif (
+                    col_b_lower in ["lastname", "nome"]
+                    and not str(row.get("Nome", "")).strip()
+                ):
+                    df_aba2.at[idx, "Nome"] = val_b
+                elif col_b_lower in ["om"] and not str(row.get("OM", "")).strip():
+                    df_aba2.at[idx, "OM"] = val_b
+
+    ordem_postos = {
+        "TB": 1,
+        "MB": 2,
+        "BR": 3,
+        "CEL": 4,
+        "CL": 4,
+        "TEN CEL": 5,
+        "TC": 5,
+        "MAJ": 6,
+        "MJ": 6,
+        "CAP": 7,
+        "CP": 7,
+        "1º TEN": 8,
+        "1T": 8,
+        "1º TEN (T)": 8,
+        "2º TEN": 9,
+        "2T": 9,
+        "ASP": 10,
+        "SO": 11,
+        "1S": 12,
+        "2S": 13,
+        "3S": 14,
+    }
+
+    df_aba2["_posto_ordem"] = (
+        df_aba2["Posto"].str.strip().str.upper().map(lambda x: ordem_postos.get(x, 99))
+    )
+    df_aba2["_data_promo"] = pd.to_datetime(
+        df_aba2["Data da Promoção Atual"], format="%d/%m/%Y", errors="coerce"
+    )
+    df_aba2["_n_quadro_num"] = pd.to_numeric(
+        df_aba2["Nº Quadro"], errors="coerce"
+    ).fillna(999999)
+
+    df_aba2 = df_aba2.sort_values(
+        by=["_posto_ordem", "_data_promo", "Quadro", "_n_quadro_num"],
+        ascending=[True, True, True, True],
+    ).drop(columns=["_posto_ordem", "_data_promo", "_n_quadro_num"])
+
+    df_aba2["Dados_formatados"] = gerar_dados_formatados(df_aba2, tipo="aluno")
+    df_aba2 = df_aba2[colunas_padrao]
+
+    # Aba 3: Comandantes
+    if not df_com.empty:
+        df_com["_posto_ordem"] = (
+            df_com["Posto"]
+            .str.strip()
+            .str.upper()
+            .map(lambda x: ordem_postos.get(x, 99))
+        )
+        df_com = df_com.sort_values(
+            by=["_posto_ordem", "Quadro"], ascending=[True, True]
+        ).drop(columns=["_posto_ordem"])
+        df_com["Dados_formatados"] = gerar_dados_formatados(df_com, tipo="comandante")
+        df_com = df_com[colunas_padrao]
+
+    # Gravação no Excel
+    with pd.ExcelWriter(arquivo_saida, engine="openpyxl") as writer:
+        df_aba1.to_excel(writer, sheet_name="Consolidado_Base", index=False)
+        df_aba2.to_excel(writer, sheet_name="Antiguidade_Formatada", index=False)
+        if not df_com.empty:
+            df_com.to_excel(writer, sheet_name="Comandantes", index=False)
+
+    # Formatação Rica (Nome de Guerra em Negrito em TODAS AS ABAS)
+    wb = openpyxl.load_workbook(arquivo_saida)
+    abas_formatar = ["Consolidado_Base", "Antiguidade_Formatada", "Comandantes"]
+
+    for nome_aba in abas_formatar:
+        if nome_aba in wb.sheetnames:
+            ws = wb[nome_aba]
+            header_row = [cell.value for cell in ws[1]]
+            idx_nome = header_row.index("Nome") + 1 if "Nome" in header_row else None
+            idx_guerra = (
+                header_row.index("Nome Guerra") + 1
+                if "Nome Guerra" in header_row
+                else None
+            )
+            idx_dados = (
+                header_row.index("Dados_formatados") + 1
+                if "Dados_formatados" in header_row
+                else None
+            )
+
+            if idx_guerra and (idx_nome or idx_dados):
+                bold_font = InlineFont(b=True)
+                for row in range(2, ws.max_row + 1):
+                    cell_guerra = ws.cell(row=row, column=idx_guerra)
+                    war_name = str(cell_guerra.value or "").strip().replace("**", "")
+
+                    if not war_name:
+                        continue
+
+                    if idx_nome:
+                        cell_nome = ws.cell(row=row, column=idx_nome)
+                        full_name = str(cell_nome.value or "").strip().replace("**", "")
+                        if full_name and war_name in full_name:
+                            parts = full_name.split(war_name)
+                            rich = CellRichText()
+                            for i, part in enumerate(parts):
+                                if part:
+                                    rich.append(part)
+                                if i < len(parts) - 1:
+                                    rich.append(TextBlock(bold_font, war_name))
+                            cell_nome.value = rich
+                            cell_nome.alignment = openpyxl.styles.Alignment(
+                                wrap_text=False
+                            )
+
+                    if idx_dados:
+                        cell_dados = ws.cell(row=row, column=idx_dados)
+                        full_dados = (
+                            str(cell_dados.value or "").strip().replace("**", "")
+                        )
+                        if full_dados and war_name in full_dados:
+                            parts = full_dados.split(war_name)
+                            rich_dados = CellRichText()
+                            for i, part in enumerate(parts):
+                                if part:
+                                    rich_dados.append(part)
+                                if i < len(parts) - 1:
+                                    rich_dados.append(TextBlock(bold_font, war_name))
+                            cell_dados.value = rich_dados
+                            cell_dados.alignment = openpyxl.styles.Alignment(
+                                wrap_text=False
+                            )
+
+    wb.save(arquivo_saida)
+    return arquivo_saida

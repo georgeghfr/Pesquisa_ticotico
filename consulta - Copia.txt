@@ -1,0 +1,388 @@
+import os
+import time
+import traceback
+from tkinter import Tk, filedialog
+import pandas as pd
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+from navegador import abrir_firefox
+from ticotico import (
+    consultar_cpf,
+    aguardar_mascaras,
+    clicar_detalhes,
+    extrair_detalhes,
+    extrair_promocoes,
+    extrair_nome,
+)
+from excel import salvar_resultado_tres_abas
+
+
+def escolher_planilha():
+    root = Tk()
+    root.withdraw()
+    arquivo = filedialog.askopenfilename(
+        title="Selecione a planilha", filetypes=[("Excel", "*.xlsx")]
+    )
+    root.destroy()
+    return arquivo
+
+
+def buscar_comandantes_oms(driver, oms_fab):
+    print("\n" + "=" * 60)
+    print("INICIANDO BUSCA DE COMANDANTES DE OM (ABA AVANÇADA)")
+    print("=" * 60)
+
+    comandantes = []
+
+    for om_alvo in oms_fab:
+        print(f"\nBuscando Comandante da OM: {om_alvo}")
+        try:
+            aguardar_mascaras(driver)
+
+            # Localiza o combo box de OMs na aba Avançada
+            combo_element = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.ID, "form:comboOM"))
+            )
+            select_om = Select(combo_element)
+
+            try:
+                select_om.select_by_visible_text(om_alvo)
+                print(f"OM '{om_alvo}' selecionada no combo.")
+            except Exception:
+                print(f"[AVISO]: OM '{om_alvo}' não encontrada no <select>. Pulando...")
+                continue
+
+            # Clica no botão Consultar da aba Avançada (form:nonAjax3)
+            print("Localizando botão Consultar (Avançada)...")
+            aguardar_mascaras(driver)
+
+            botao = WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.ID, "form:nonAjax3"))
+            )
+
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", botao
+            )
+
+            def botao_livre(d):
+                try:
+                    return (
+                        botao.is_displayed()
+                        and botao.is_enabled()
+                        and d.execute_script(
+                            """
+                            const el = arguments[0];
+                            const rect = el.getBoundingClientRect();
+                            const x = rect.left + rect.width / 2;
+                            const y = rect.top + rect.height / 2;
+                            const top = document.elementFromPoint(x, y);
+                            return top === el || el.contains(top);
+                        """,
+                            botao,
+                        )
+                    )
+                except:
+                    return False
+
+            WebDriverWait(driver, 30).until(botao_livre)
+            driver.execute_script("arguments[0].click();", botao)
+            print("Consulta acionada.")
+
+            time.sleep(1.5)
+            aguardar_mascaras(driver)
+
+            tabelas = WebDriverWait(driver, 30).until(
+                EC.presence_of_all_elements_located((By.ID, "form:ticoTable"))
+            )
+
+            if not tabelas:
+                print("Tabela de resultado não encontrada para esta OM.")
+                continue
+
+            tabela = tabelas[0]
+            linhas = tabela.find_elements(By.XPATH, ".//tr")
+
+            linhas_dados = []
+            for linha in linhas:
+                tds = linha.find_elements(By.TAG_NAME, "td")
+                if len(tds) >= 9:
+                    linhas_dados.append((linha, tds))
+
+            if not linhas_dados:
+                print("Nenhum militar listado na tabela desta OM.")
+                continue
+
+            # Pega o 1º militar da lista (Comandante) e abre os detalhes
+            linha_cmd, tds = linhas_dados[0]
+
+            numero_quadro, promocoes = extrair_promocoes(tds[0])
+            nome, guerra = extrair_nome(tds[4])
+
+            # Clica no botão de detalhes para extrair todas as informações completas
+            tabela_detalhes = clicar_detalhes(driver, linha_cmd)
+            detalhes = extrair_detalhes(driver, tabela_detalhes)
+
+            registro_cmd = {
+                "CPF": "",
+                "SARAM": tds[3].text.strip(),
+                "Sexo": "",
+                "Posto": tds[1].text.strip(),
+                "Quadro": tds[2].text.strip(),
+                "Especialidade": "",
+                "Sub-Especialidade": "",
+                "Nome": nome,
+                "Nome Guerra": guerra,
+                "OM": om_alvo,
+                "Nº Quadro": numero_quadro,
+                "Primeira Promoção": tds[5].text.strip(),
+                "Promoções": promocoes,
+                "Situação OM": tds[7].text.strip(),
+                "Erro": "",
+            }
+
+            # Adiciona os campos dinâmicos extraídos dos detalhes
+            for campo, valor in detalhes.items():
+                registro_cmd[campo] = valor
+
+            comandantes.append(registro_cmd)
+            print(
+                f"✅ Comandante detalhado definido para {om_alvo}: {registro_cmd['Posto']} {nome}"
+            )
+
+        except Exception as e:
+            print(f"[ERRO ao consultar OM {om_alvo}]: {e}")
+
+    return comandantes
+
+
+def main():
+    print("=" * 60)
+    print("CONSULTA AUTOMÁTICA DE CPF E COMANDANTES - TICO TICO")
+    print("=" * 60)
+
+    arquivo = escolher_planilha()
+
+    if not arquivo:
+        print("Nenhuma planilha selecionada.")
+        return
+
+    print(f"\nPlanilha: {os.path.basename(arquivo)}")
+
+    df_raw = pd.read_excel(arquivo, header=None)
+    if len(df_raw) < 2:
+        raise Exception("A planilha parece estar vazia.")
+
+    df_head = pd.read_excel(arquivo, nrows=0)
+    col_cpf = None
+    for col in df_head.columns:
+        if str(col).strip().upper() == "CPF":
+            col_cpf = col
+            break
+
+    if col_cpf is None:
+        print("\n[ERRO CRÍTICO]: A coluna 'CPF' não foi encontrada na planilha.")
+        input("\nPressione ENTER para fechar...")
+        return
+
+    df = pd.read_excel(arquivo, dtype={col_cpf: str})
+
+    col_om = None
+    for col in df.columns:
+        col_limpa = str(col).strip().upper()
+        if col_limpa in ["OM", "ORGANIZAÇÃO MILITAR", "ORGANIZACAO MILITAR"]:
+            col_om = col
+            break
+
+    if col_om is None:
+        print("\n[ERRO CRÍTICO]: A coluna de 'OM' não foi encontrada na planilha.")
+        input("\nPressione ENTER para fechar...")
+        return
+
+    col_guerra_base = None
+    col_nome_base = None
+    col_posto_base = None
+    col_quadro_base = None
+    col_saram_base = None
+
+    for col in df.columns:
+        col_limpa = str(col).strip().lower()
+        if col_limpa in ["nome de guerra", "guerra", "nome_guerra"]:
+            col_guerra_base = col
+        elif col_limpa in ["lastname", "nome"]:
+            col_nome_base = col
+        elif col_limpa in ["firstname", "posto"]:
+            col_posto_base = col
+        elif col_limpa in ["quadro"]:
+            col_quadro_base = col
+        elif col_limpa in ["saram", "matrícula", "matricula"]:
+            col_saram_base = col
+
+    idx_om_df = df.columns.get_loc(col_om)
+
+    df["CPF_limpo"] = (
+        df[col_cpf]
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\D", "", regex=True)
+        .str.slice(-11)
+        .str.zfill(11)
+    )
+
+    df = df.dropna(subset=[col_cpf])
+    df = df[df[col_cpf].str.strip() != ""]
+
+    total = len(df)
+    print(f"{total} linha(s) encontrada(s) na planilha.")
+
+    print("\nAbrindo Firefox...")
+    driver = abrir_firefox()
+
+    input("\nFaça login, entre em 'Por Documento' e pressione ENTER...")
+
+    resultados = []
+    termos_bloqueados = [
+        "marinha",
+        "marinha do brasil",
+        "mb",
+        "exército",
+        "exercito",
+        "exército brasileiro",
+        "exercito brasileiro",
+        "eb",
+    ]
+
+    oms_fab_detectadas = set()
+
+    for indice, row in df.iterrows():
+        row_raw = (
+            df_raw.iloc[indice + 1] if indice + 1 < len(df_raw) else df_raw.iloc[indice]
+        )
+        cpf = str(row["CPF_limpo"]).strip()
+
+        om_original = str(row.get(col_om, "")).strip()
+        if not om_original or om_original.lower() == "nan":
+            om_original = (
+                str(row_raw.get(idx_om_df, "")).strip()
+                if pd.notna(row_raw.get(idx_om_df))
+                else ""
+            )
+
+        om_minuscula = om_original.lower()
+
+        print("\n" + "=" * 60)
+        print(f"Linha {indice + 1}/{total} - CPF: {cpf} - OM: {om_original}")
+        print("=" * 60)
+
+        pular_consulta = any(termo in om_minuscula for termo in termos_bloqueados)
+
+        if not pular_consulta and om_original and om_original.upper() != "NAN":
+            oms_fab_detectadas.add(om_original)
+
+        if pular_consulta:
+            print(
+                f"-> Pulando CPF {cpf}: OM '{om_original}' identificada como outra força (Marinha/Exército)."
+            )
+            nome_base = str(row.get(col_nome_base, "")).strip() if col_nome_base else ""
+            guerra_base = (
+                str(row.get(col_guerra_base, "")).strip() if col_guerra_base else ""
+            )
+            posto_base = (
+                str(row.get(col_posto_base, "")).strip() if col_posto_base else ""
+            )
+            quadro_base = (
+                str(row.get(col_quadro_base, "")).strip() if col_quadro_base else ""
+            )
+            saram_base = (
+                str(row.get(col_saram_base, "")).strip() if col_saram_base else ""
+            )
+
+            registro = {
+                "CPF": cpf,
+                "SARAM": saram_base,
+                "OM": om_original,
+                "Nome": nome_base,
+                "Nome Guerra": guerra_base,
+                "Quadro": quadro_base,
+                "Posto": posto_base,
+                "Nº Quadro": "",
+                "Primeira Promoção": "",
+                "Promoções": "",
+                "Situação OM": "",
+                "Erro": "Pulado: Servidor de Outra Força (Marinha/Exército)",
+            }
+            resultados.append(registro)
+            salvar_resultado_tres_abas(arquivo, df, resultados)
+            continue
+
+        try:
+            dados = consultar_cpf(driver, cpf)
+            if dados.get("Erro"):
+                dados["OM"] = om_original
+
+            if not dados.get("Nome Guerra") and col_guerra_base:
+                dados["Nome Guerra"] = str(row.get(col_guerra_base, "")).strip()
+
+            resultados.append(dados)
+            salvar_resultado_tres_abas(arquivo, df, resultados)
+            print("OK")
+
+        except Exception as erro:
+            print("\nERRO:", erro)
+            traceback.print_exc()
+
+            nome_base = str(row.get(col_nome_base, "")).strip() if col_nome_base else ""
+            guerra_base = (
+                str(row.get(col_guerra_base, "")).strip() if col_guerra_base else ""
+            )
+            posto_base = (
+                str(row.get(col_posto_base, "")).strip() if col_posto_base else ""
+            )
+            quadro_base = (
+                str(row.get(col_quadro_base, "")).strip() if col_quadro_base else ""
+            )
+            saram_base = (
+                str(row.get(col_saram_base, "")).strip() if col_saram_base else ""
+            )
+
+            registro = {
+                "CPF": cpf,
+                "SARAM": saram_base,
+                "OM": om_original,
+                "Nome": nome_base,
+                "Nome Guerra": guerra_base,
+                "Quadro": quadro_base,
+                "Posto": posto_base,
+                "Nº Quadro": "",
+                "Primeira Promoção": "",
+                "Promoções": "",
+                "Situação OM": "",
+                "Erro": "Possível baixa",
+            }
+            resultados.append(registro)
+            salvar_resultado_tres_abas(arquivo, df, resultados)
+
+    # =========================================================================
+    # FASE FINAL: BUSCA DE COMANDANTES APÓS A CONSULTA DOS ALUNOS
+    # =========================================================================
+    comandantes = []
+    if oms_fab_detectadas:
+        print(
+            f"\nTotal de OMs exclusivas da FAB encontradas: {len(oms_fab_detectadas)}"
+        )
+        input(
+            "\nAlunos consultados com sucesso! Vá manualmente até a aba 'Avançada' no Tico-Tico e pressione ENTER para iniciar a busca dos comandantes..."
+        )
+
+        comandantes = buscar_comandantes_oms(driver, list(oms_fab_detectadas))
+
+        # Salva o resultado final incluindo a aba de comandantes com os detalhes extraídos
+        salvar_resultado_tres_abas(arquivo, df, resultados, comandantes)
+
+    print("\nProcesso completo finalizado com sucesso!")
+    driver.quit()
+
+
+if __name__ == "__main__":
+    main()

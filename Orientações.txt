@@ -1,0 +1,7 @@
+1 - abrir o VScode ou o terminal.
+2 - navegar até a pasta que contém o arquivo consulta.py.
+3 - executar o comando "python consulta.py" ou "py consulta.py" (depende do terminal que está usando).
+4 - selecionar o arquivo de planilha .xlsx com os CPFs (a coluna com os CPFs deve ter o nome "CPF" na primeira linha)
+5 - esperar a janela do navegador abrir, fazer o login no portal do militar, navegar até tico-tico, selecionar a busca "Por documento" e deixar o cursor no campo para preencher o CPF.
+6 - voltar até o termina e apertar enter para o programa realizar as buscas.
+7 - o arquivos com os resultados estará em na pasta de downloads ou na mesma pasta que o arquivo selecionado com os CPF está.
